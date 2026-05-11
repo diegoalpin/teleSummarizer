@@ -35,8 +35,8 @@ load_dotenv()
 # GROUP_NAME        = "PRTOC : Puma Run To Other Clubs"          # e.g. "My Dev Group" or "mygroupusername"
 
 #Digg15 +6287876932981
-TELEGRAM_API_ID   = int(os.getenv("TELEGRAM_API_ID_DIEGO"))           # from my.telegram.org
-TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH_DIEGO")       # from my.telegram.org
+TELEGRAM_API_ID   = int(os.getenv("TELEGRAM_API_ID"))           # from my.telegram.org
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")       # from my.telegram.org
 GROUP_NAME        = "Social Trade Exclusive"          # e.g. "My Dev Group" or "mygroupusername"
 
 # API keys — only the one you use needs to be filled
