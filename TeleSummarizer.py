@@ -4,17 +4,18 @@ Telegram Group Summarizer
 Summarizes Telegram group messages using a switchable AI engine.
 
 Supported engines:
-  - groq      : Groq API (fast, free tier)
-  - claude    : Anthropic Claude API
-  - ollama    : Local Ollama (fully offline)
+  - openrouter : OpenRouter (default, openai/gpt-5.6-luna with reasoning)
+  - groq       : Groq API (fast, free tier)
+  - claude     : Anthropic Claude API
+  - ollama     : Local Ollama (fully offline)
 
 Usage:
-  python summarize.py --mode count  --value 200  --engine groq
-  python summarize.py --mode hours  --value 6    --engine claude
-  python summarize.py --mode since  --value "2024-01-15 09:00"  --engine ollama
+  python TeleSummarizer.py --mode count  --value 200                      # openrouter (default)
+  python TeleSummarizer.py --mode hours  --value 6    --engine claude
+  python TeleSummarizer.py --mode since  --value "2024-01-15 09:00"  --engine ollama
 
 Setup:
-  pip install telethon groq anthropic requests
+  pip install telethon groq anthropic requests python-dotenv
 """
 
 import asyncio
@@ -40,17 +41,27 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")       # from my.telegram.org
 GROUP_NAME        = "Social Trade Exclusive"          # e.g. "My Dev Group" or "mygroupusername"
 
 # API keys — only the one you use needs to be filled
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")   # from openrouter.ai/keys
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY")          # from console.groq.com
 ANTHROPIC_API_KEY = ""          # from console.anthropic.com
 
 # Model defaults per engine (change if you prefer a different model)
 ENGINE_MODELS = {
+    "openrouter": "openai/gpt-5.6-luna",     # smartest, reasoning enabled
     "groq"   : "llama-3.3-70b-versatile",       # fast & free
     "claude" : "claude-haiku-4-5-20251001",  # fast & cheap
     "ollama" : "mistral",              # local model name
 }
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL     = "http://localhost:11434"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Reasoning models spend part of the token budget thinking before they answer,
+# so the cap has to cover reasoning + summary, not just the summary.
+OPENROUTER_MAX_TOKENS = 8192
+
+# Telegram rejects any single message over 4096 characters. Leave headroom for part markers.
+TELEGRAM_MAX_CHARS = 4000
 
 # ─────────────────────────────────────────────
 # SUMMARIZATION ENGINES
@@ -96,6 +107,40 @@ def build_prompt(messages: List[str], label: str) -> str:
 # Just drop the function as a replacement in your existing script — no other changes needed.
 
 
+def summarize_openrouter(prompt: str, model: str) -> str:
+    import requests
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is not set — add it to your .env")
+
+    response = requests.post(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "reasoning": {"enabled": True},
+            "max_tokens": OPENROUTER_MAX_TOKENS,
+        },
+        timeout=300,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if "error" in payload:
+        raise RuntimeError(f"OpenRouter error: {payload['error']}")
+
+    content = payload["choices"][0]["message"].get("content")
+    if not content:
+        raise RuntimeError(
+            "OpenRouter returned an empty summary — the model may have spent the whole "
+            f"token budget reasoning (finish_reason: {payload['choices'][0].get('finish_reason')})"
+        )
+    return content
+
+
 def summarize_groq(prompt: str, model: str) -> str:
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
@@ -135,7 +180,9 @@ def summarize(messages: List[str], label: str, engine: str) -> str:
 
     print(f"  Engine  : {engine} ({model})")
 
-    if engine == "groq":
+    if engine == "openrouter":
+        return summarize_openrouter(prompt, model)
+    elif engine == "groq":
         return summarize_groq(prompt, model)
     elif engine == "claude":
         return summarize_claude(prompt, model)
@@ -148,6 +195,38 @@ def summarize(messages: List[str], label: str, engine: str) -> str:
 # ─────────────────────────────────────────────
 # TELEGRAM HELPERS
 # ─────────────────────────────────────────────
+
+def tg_len(text: str) -> int:
+    """Telegram measures message length in UTF-16 code units, so emoji count as 2."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def split_for_telegram(text: str, limit: int = TELEGRAM_MAX_CHARS) -> List[str]:
+    """Break a long summary into Telegram-sized chunks, splitting on line boundaries."""
+    chunks: List[str] = []
+    current = ""
+
+    for line in text.split("\n"):
+        # A single line over the limit can only be split mid-line.
+        while tg_len(line) > limit:
+            if current:
+                chunks.append(current.rstrip("\n"))
+                current = ""
+            head = line[:limit]
+            while tg_len(head) > limit:
+                head = head[:-1]
+            chunks.append(head)
+            line = line[len(head):]
+
+        if current and tg_len(current) + tg_len(line) + 1 > limit:
+            chunks.append(current.rstrip("\n"))
+            current = ""
+        current += line + "\n"
+
+    if current.strip():
+        chunks.append(current.rstrip("\n"))
+    return chunks or [text]
+
 
 async def find_group(client, name: str):
     async for dialog in client.iter_dialogs():
@@ -239,8 +318,14 @@ async def run(mode: str, value: str, engine: str):
         f"{summary}"
     )
 
-    await tg.send_message("me", full_message)
-    print("\n✅ Summary sent to your Saved Messages!")
+    parts = split_for_telegram(full_message)
+    for i, part in enumerate(parts, 1):
+        if len(parts) > 1:
+            part = f"{part}\n\n— part {i}/{len(parts)} —"
+        await tg.send_message("me", part)
+
+    suffix = f" in {len(parts)} messages" if len(parts) > 1 else ""
+    print(f"\n✅ Summary sent to your Saved Messages{suffix}!")
     await tg.disconnect()
 
 
@@ -255,8 +340,8 @@ if __name__ == "__main__":
         help='Value for mode: number for count/hours, "YYYY-MM-DD HH:MM" for since'
     )
     parser.add_argument(
-        "--engine", choices=["groq", "claude", "ollama"], default="groq",
-        help="AI engine to use for summarization (default: groq)"
+        "--engine", choices=["openrouter", "groq", "claude", "ollama"], default="openrouter",
+        help="AI engine to use for summarization (default: openrouter)"
     )
     args = parser.parse_args()
 

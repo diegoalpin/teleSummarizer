@@ -16,9 +16,10 @@ Telegram Group → Telethon fetch → build_prompt() → LLM → Saved Messages
 
 **Why Telethon (user client, not a bot):** bots can't read private groups. A user client can read any group you're a member of, which is the common case.
 
-**Why three LLM engines:**
-- `groq` (`llama-3.3-70b-versatile`) — free tier, very fast. Default for daily cron runs.
-- `claude` (`claude-haiku-4-5`) — better reasoning for dense or nuanced content.
+**Why four LLM engines:**
+- `openrouter` (`openai/gpt-5.6-luna`, reasoning enabled) — **default.** Best summary quality; one key gets you any model OpenRouter hosts, so swapping models is a one-line change.
+- `groq` (`llama-3.3-70b-versatile`) — free tier, very fast. Good fallback for high-frequency cron runs.
+- `claude` (`claude-haiku-4-5`) — cheap and fast for dense or nuanced content.
 - `ollama` (`mistral`, local) — fully offline; message content never leaves your machine.
 
 **Why two scripts instead of one:** the prompt is the whole product. `TeleSummarizer.py` organizes by topic; `EdSum.py` reorganizes by stock ticker and bakes in an Indonesian slang glossary. Keeping them separate makes each one easy to hack.
@@ -46,9 +47,12 @@ TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 
 # LLM keys — only fill what you'll use
+OPENROUTER_API_KEY=sk-or-v1-...
 GROQ_API_KEY=gsk_...
 ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+Get an OpenRouter key at [openrouter.ai/keys](https://openrouter.ai/keys) — it's the default engine.
 
 ### 4. Set your target group
 
@@ -61,11 +65,11 @@ GROUP_NAME = "My Group Name"  # case-insensitive, partial match OK
 ### 5. Run
 
 ```bash
-# Last 200 messages via Groq (default engine)
+# Last 200 messages via OpenRouter / GPT-5.6 Luna (default engine)
 python TeleSummarizer.py --mode count --value 200
 
-# Last 6 hours via Claude
-python TeleSummarizer.py --mode hours --value 6 --engine claude
+# Last 6 hours via Groq
+python TeleSummarizer.py --mode hours --value 6 --engine groq
 
 # Since a specific datetime via local Ollama
 python TeleSummarizer.py --mode since --value "2026-01-15 09:00" --engine ollama
@@ -79,7 +83,7 @@ On first run, Telethon will prompt for your phone number and a Telegram verifica
 |---|---|---|
 | `--mode` | yes | `count` / `hours` / `since` |
 | `--value` | yes | int for `count`/`hours`, `"YYYY-MM-DD HH:MM"` for `since` |
-| `--engine` | no | `groq` (default) / `claude` / `ollama` |
+| `--engine` | no | `openrouter` (default) / `groq` / `claude` / `ollama` |
 
 ---
 
