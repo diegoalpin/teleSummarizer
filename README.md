@@ -1,8 +1,8 @@
 # teleSummarizer
 
-Summarize Telegram group chats with a switchable LLM backend. Point it at a group, pick a time window, get a structured summary posted to your Saved Messages.
+Summarize Telegram group chats with a switchable LLM backend. Point it at a group, pick a time window, get a structured summary sent wherever you want.
 
-Ships with two scripts:
+Ships with two thin entrypoints on top of a shared `summarizer/` package:
 - **`TeleSummarizer.py`** — general-purpose, topic-organized with attribution
 - **`EdSum.py`** — Indonesian stock market groups, ticker-first with sentiment and slang awareness
 
@@ -11,7 +11,7 @@ Ships with two scripts:
 ## How it works
 
 ```
-Telegram Group → Telethon fetch → build_prompt() → LLM → Saved Messages
+Telegram Group → source.fetch_messages() → prompts.build() → engines.summarize() → delivery.deliver()
 ```
 
 **Why Telethon (user client, not a bot):** bots can't read private groups. A user client can read any group you're a member of, which is the common case.
@@ -22,7 +22,32 @@ Telegram Group → Telethon fetch → build_prompt() → LLM → Saved Messages
 - `claude` (`claude-haiku-4-5`) — cheap and fast for dense or nuanced content.
 - `ollama` (`mistral`, local) — fully offline; message content never leaves your machine.
 
-**Why two scripts instead of one:** the prompt is the whole product. `TeleSummarizer.py` organizes by topic; `EdSum.py` reorganizes by stock ticker and bakes in an Indonesian slang glossary. Keeping them separate makes each one easy to hack.
+**Why two entrypoints instead of one:** the prompt is the whole product. `TeleSummarizer.py` organizes by topic; `EdSum.py` reorganizes by stock ticker and bakes in an Indonesian slang glossary. Each is a ~20-line script that just points `summarizer.cli.main()` at its own prompt.
+
+---
+
+## Project layout
+
+```
+summarizer/
+  config.py       env vars, per-engine model defaults, limits
+  timeframe.py    "--last 1w" / "12h" / "200" / "--since ..." → a fetch instruction
+  source.py       connects to Telegram, resolves the target chat, fetches Message objects
+  engines.py      openrouter / groq / claude / ollama → summary text
+  delivery.py     resolves "--to", chunks long summaries, sends (or prints, if --dry-run)
+  prompts/
+    general.py    topic-organized prompt (TeleSummarizer.py)
+    stocks.py     ticker-organized prompt with slang glossary (EdSum.py)
+    slang.py      Indonesian stock-market slang glossary
+  pipeline.py     wires fetch → prompt → engine → delivery into one run
+  cli.py          shared argparse, used by both entrypoints
+EdSum.py           entrypoint: stocks prompt, defaults to the trading group
+TeleSummarizer.py  entrypoint: general prompt, requires --group
+```
+
+Adding a third summarizer (a different chat, a different prompt style) is a new
+`prompts/*.py` module plus a new ~20-line entrypoint — no copy-pasting the fetch,
+engine, or delivery logic.
 
 ---
 
@@ -56,23 +81,30 @@ Get an OpenRouter key at [openrouter.ai/keys](https://openrouter.ai/keys) — it
 
 ### 4. Set your target group
 
-Edit `GROUP_NAME` near the top of the script you're using:
+`EdSum.py` defaults to a hardcoded trading group; override it with `--group`.
+`TeleSummarizer.py` has no default — pass `--group` every time:
 
-```python
-GROUP_NAME = "My Group Name"  # case-insensitive, partial match OK
+```bash
+python TeleSummarizer.py --group "My Group Name" --last 200   # case-insensitive, partial match OK
 ```
 
 ### 5. Run
 
 ```bash
-# Last 200 messages via OpenRouter / GPT-5.6 Luna (default engine)
-python TeleSummarizer.py --mode count --value 200
+# Last 200 messages via OpenRouter / GPT-5.6 Luna (default engine), to Saved Messages (default)
+python EdSum.py --last 200
 
-# Last 6 hours via Groq
-python TeleSummarizer.py --mode hours --value 6 --engine groq
+# Last 12 hours via Groq
+python EdSum.py --last 12h --engine groq
 
-# Since a specific datetime via local Ollama
-python TeleSummarizer.py --mode since --value "2026-01-15 09:00" --engine ollama
+# Last week, sent as a DM instead of Saved Messages
+python EdSum.py --last 1w --to "@someone"
+
+# Everything since a specific datetime (UTC), via local Ollama
+python EdSum.py --since "2026-01-15 09:00" --engine ollama
+
+# Preview the summary in the terminal without sending anything
+python EdSum.py --last 50 --dry-run
 ```
 
 On first run, Telethon will prompt for your phone number and a Telegram verification code. After that, `tg_session.session` is saved and reused automatically.
@@ -81,9 +113,14 @@ On first run, Telethon will prompt for your phone number and a Telegram verifica
 
 | Flag | Required | Values |
 |---|---|---|
-| `--mode` | yes | `count` / `hours` / `since` |
-| `--value` | yes | int for `count`/`hours`, `"YYYY-MM-DD HH:MM"` for `since` |
+| `--group` | `EdSum.py`: no (has a default) · `TeleSummarizer.py`: yes | partial group name, case-insensitive |
+| `--last` | one of `--last` / `--since` / legacy `--mode`+`--value` | a message count (`200`) or duration (`30m`, `12h`, `3d`, `1w`) |
+| `--since` | | `"YYYY-MM-DD HH:MM"`, interpreted as UTC |
 | `--engine` | no | `openrouter` (default) / `groq` / `claude` / `ollama` |
+| `--to` | no | `"me"` (default, Saved Messages) / `"@username"` / phone number / group name |
+| `--dry-run` | no | print the summary to the console instead of sending it |
+
+The original `--mode {count,hours,since} --value X` flags still work as aliases for `--last`/`--since`, so existing scripts (like `run.sh`) don't need to change.
 
 ---
 
@@ -91,8 +128,7 @@ On first run, Telethon will prompt for your phone number and a Telegram verifica
 
 - **Persistent listener + SQLite** — instead of re-fetching every run, keep a background process that stores new messages incrementally; summarize from the local DB.
 - **`/summarize` on-demand command** — turn it into a proper Telegram bot command so any group member can trigger a summary without touching the terminal.
-- **Multi-group support** — one config file, many source groups, routing summaries to different destinations.
-- **Consolidate env var naming** — replace the `_DIEGO` / `_DIGG15` suffixes with a single `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` pair so forking doesn't require editing variable names.
+- **Multi-group, multi-destination config** — one config file, many source groups, each routed to its own `--to`.
 - **Streaming output** — for long summaries, stream the LLM response directly into Telegram instead of waiting for the full completion.
 
 ---

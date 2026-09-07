@@ -1,4 +1,4 @@
-# slang_glossary.py
+"""Indonesian stock-market chat slang, used by prompts/stocks.py."""
 
 SLANG = {
     "cuan": "profit",
@@ -11,6 +11,7 @@ SLANG = {
     "avg down": "averaging down on a position",
     "mantul": "bounce (from 'mental balik')",
 }
+
 
 def format_slang_for_prompt(slang: dict = SLANG) -> str:
     return "\n".join(f"- '{k}' = {v}" for k, v in slang.items())
